@@ -1,4 +1,4 @@
-import pyodbc
+import pymssql
 import requests
 import os
 import json
@@ -28,7 +28,6 @@ SYNC_INTERVAL  = int(os.getenv("SYNC_INTERVAL", 2))
 LAST_SYNC_FILE = "last_sync.txt"
 
 # Dummy coordinates — satisfies ERPNext geo validation
-# Using a neutral location (0.1, 0.1 avoids "zero" rejection)
 DUMMY_LAT  = 23.1853548
 DUMMY_LNG  = 77.458905
 DUMMY_GEO  = json.dumps({
@@ -61,25 +60,23 @@ def get_last_sync_time():
 
 def update_last_sync_time(sync_time):
     with open(LAST_SYNC_FILE, "w") as f:
-        f.write(sync_time)  
+        f.write(sync_time)
 
 # ================================================================
-#  SQL CONNECTION
+#  SQL CONNECTION  (pymssql — works on Render without any drivers)
 # ================================================================
 def connect_sql():
-    conn_str = (
-        f"DRIVER={{ODBC Driver 17 for SQL Server}};"
-        f"SERVER={SQL_SERVER},1433;"
-        f"DATABASE={SQL_DB};"
-        f"UID={SQL_USER};"
-        f"PWD={SQL_PASSWORD};"
-        "TrustServerCertificate=yes;"
+    return pymssql.connect(
+        server=SQL_SERVER,
+        user=SQL_USER,
+        password=SQL_PASSWORD,
+        database=SQL_DB,
+        port=1433,
+        login_timeout=10
     )
-    return pyodbc.connect(conn_str, timeout=10)
 
 # ================================================================
 #  PUSH TO ERPNext
-#  Sends exact same fields as existing records including geo data
 # ================================================================
 def push_to_erpnext(erp_employee, punch_time, log_type):
     headers = {
@@ -109,6 +106,9 @@ def push_to_erpnext(erp_employee, punch_time, log_type):
             return True, None
         if response.status_code == 409:
             return True, "duplicate"
+        # ERPNext returns 500 for duplicate timestamp instead of 409
+        if "already has a log with the same timestamp" in response.text:
+            return True, "duplicate"
         return False, response.text[:200]
     except Exception as e:
         return False, str(e)
@@ -136,10 +136,10 @@ def sync_attendance():
         """
         SELECT EmployeeCode, LogDateTime, Direction
         FROM AttenInfo
-        WHERE LogDateTime > ?
+        WHERE LogDateTime > %s
         ORDER BY LogDateTime ASC
         """,
-        last_sync
+        (last_sync,)
     )
 
     latest_time = last_sync
